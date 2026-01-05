@@ -24,7 +24,7 @@ try:
     input_details = interpreter.get_input_details()
     output_details = interpreter.get_output_details()
 except:
-    st.error("Model deteksi-kantuk.tflite tidak ditemukan")
+    st.error("❌ Model deteksi-kantuk.tflite tidak ditemukan")
     st.stop()
 
 # ==========================================
@@ -43,7 +43,7 @@ eye_cascade = cv2.CascadeClassifier(
 def play_alarm():
     st.components.v1.html("""
     <audio autoplay>
-    <source src="https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3">
+        <source src="https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3">
     </audio>
     """, height=0)
 
@@ -64,7 +64,7 @@ def predict_eye(eye_img):
 # ==========================================
 def process_frame(frame, alarm_threshold, start_time_closed):
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
     faces = face_cascade.detectMultiScale(gray, 1.3, 5)
     status = "TIDAK_TAHU"
@@ -85,13 +85,13 @@ def process_frame(frame, alarm_threshold, start_time_closed):
             cv2.rectangle(roi_color, (ex,ey), (ex+ew,ey+eh), color, 2)
 
         if probs:
-            avg = sum(probs)/len(probs)
+            avg = sum(probs) / len(probs)
             score_display = int(avg * 100)
             status = "TERBUKA" if avg > 0.5 else "TERTUTUP"
 
         cv2.rectangle(rgb, (x,y), (x+w,y+h), (0,255,0), 2)
 
-    # TIMER LOGIC
+    # TIMER
     duration = 0
     if status == "TERTUTUP":
         if start_time_closed is None:
@@ -101,7 +101,6 @@ def process_frame(frame, alarm_threshold, start_time_closed):
         start_time_closed = None
 
     alarm = duration > alarm_threshold
-
     return rgb, status, score_display, duration, start_time_closed, alarm
 
 # ==========================================
@@ -123,27 +122,37 @@ alarm_threshold = st.sidebar.slider(
 # ==========================================
 st.title("👁️ Deteksi Kantuk Pengemudi")
 
+cam_status = st.empty()
 status_text = st.empty()
 kpi_text = st.empty()
 timer_text = st.empty()
 frame_window = st.image([])
 
 # ==========================================
-# MODE 1: KAMERA
+# MODE 1: KAMERA REALTIME
 # ==========================================
 if mode == "📷 Kamera Realtime":
     run = st.checkbox("Buka Kamera")
 
     if run:
         cap = cv2.VideoCapture(0)
+
+        if not cap.isOpened():
+            cam_status.error("❌ Kamera TIDAK bisa dibuka")
+            st.stop()
+        else:
+            cam_status.success("✅ Kamera berhasil dibuka")
+
         start_time_closed = None
 
         while run:
             ret, frame = cap.read()
             if not ret:
+                cam_status.error("❌ Gagal membaca frame kamera")
                 break
 
             frame = cv2.flip(frame, 1)
+
             frame, status, score, duration, start_time_closed, alarm = process_frame(
                 frame, alarm_threshold, start_time_closed
             )
@@ -159,6 +168,8 @@ if mode == "📷 Kamera Realtime":
             timer_text.metric("Timer", f"{duration:.2f}s")
 
         cap.release()
+    else:
+        cam_status.info("📷 Kamera belum dibuka")
 
 # ==========================================
 # MODE 2: FOTO
@@ -170,7 +181,7 @@ elif mode == "🖼️ Upload Foto":
         file_bytes = np.asarray(bytearray(uploaded.read()), dtype=np.uint8)
         frame = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
-        frame, status, score, duration, _, alarm = process_frame(
+        frame, status, score, duration, _, _ = process_frame(
             frame, alarm_threshold, None
         )
 
@@ -190,11 +201,22 @@ elif mode == "🎥 Upload Video":
         tfile.write(uploaded.read())
 
         cap = cv2.VideoCapture(tfile.name)
+
+        if not cap.isOpened():
+            st.error("❌ Video tidak bisa dibuka")
+            st.stop()
+        else:
+            st.success("🎥 Video berhasil dimuat")
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        delay = 1 / fps if fps > 0 else 0.03
+
         start_time_closed = None
 
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
+                st.info("✅ Video selesai")
                 break
 
             frame, status, score, duration, start_time_closed, alarm = process_frame(
@@ -210,5 +232,7 @@ elif mode == "🎥 Upload Video":
             frame_window.image(frame)
             kpi_text.metric("Skor Mata", f"{score}%")
             timer_text.metric("Timer", f"{duration:.2f}s")
+
+            time.sleep(delay)  # 🔑 bikin video jalan
 
         cap.release()
