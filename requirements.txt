@@ -1,11 +1,11 @@
 streamlit==1.32.2
-streamlit-webrtc==0.47.9
+streamlit-webrtc==0.47.7
 
-tensorflow==2.13.1
+tensorflow==2.13.0
 opencv-python-headless==4.8.1.78
 
 numpy==1.24.4
 av==10.0.0
-aiortc==1.5.0
+aiortc==1.9.4
 
 Pillow
