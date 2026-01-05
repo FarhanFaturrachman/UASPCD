@@ -3,12 +3,12 @@ import cv2
 import numpy as np
 import tensorflow as tf
 import time
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
+import tempfile
 
 # ==========================================
 # SETUP HALAMAN
 # ==========================================
-st.set_page_config(page_title="Deteksi Kantuk + Delay Cerdas", layout="wide")
+st.set_page_config(page_title="Deteksi Kantuk", layout="wide")
 
 # ==========================================
 # LOAD MODEL TFLITE
@@ -19,140 +19,196 @@ def load_model():
     interpreter.allocate_tensors()
     return interpreter
 
-interpreter = load_model()
-input_details = interpreter.get_input_details()
-output_details = interpreter.get_output_details()
+try:
+    interpreter = load_model()
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+except:
+    st.error("Model deteksi-kantuk.tflite tidak ditemukan")
+    st.stop()
 
 # ==========================================
-# CASCADE
+# LOAD CASCADE
 # ==========================================
 face_cascade = cv2.CascadeClassifier(
-    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
 )
 eye_cascade = cv2.CascadeClassifier(
-    cv2.data.haarcascades + "haarcascade_eye.xml"
+    cv2.data.haarcascades + 'haarcascade_eye.xml'
 )
 
 # ==========================================
 # ALARM
 # ==========================================
 def play_alarm():
-    st.components.v1.html(
-        """
-        <audio autoplay>
-        <source src="https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3">
-        </audio>
-        """,
-        height=0,
-    )
+    st.components.v1.html("""
+    <audio autoplay>
+    <source src="https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3">
+    </audio>
+    """, height=0)
 
 # ==========================================
 # PREDIKSI MATA
 # ==========================================
 def predict_eye(eye_img):
     img = cv2.resize(eye_img, (64, 64))
-    img = img.astype(np.float32) / 255.0
-    img = np.expand_dims(img, axis=0)
+    img = img / 255.0
+    img = np.expand_dims(img.astype(np.float32), axis=0)
 
-    interpreter.set_tensor(input_details[0]["index"], img)
+    interpreter.set_tensor(input_details[0]['index'], img)
     interpreter.invoke()
-    return interpreter.get_tensor(output_details[0]["index"])[0][0]
+    return interpreter.get_tensor(output_details[0]['index'])[0][0]
+
+# ==========================================
+# PROSES 1 FRAME
+# ==========================================
+def process_frame(frame, alarm_threshold, start_time_closed):
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+
+    faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+    status = "TIDAK_TAHU"
+    score_display = 0
+
+    for (x, y, w, h) in faces:
+        roi_gray = gray[y:y+h, x:x+w]
+        roi_color = rgb[y:y+h, x:x+w]
+        eyes = eye_cascade.detectMultiScale(roi_gray)
+
+        probs = []
+        for (ex, ey, ew, eh) in eyes:
+            eye_img = roi_color[ey:ey+eh, ex:ex+ew]
+            pred = predict_eye(eye_img)
+            probs.append(pred)
+
+            color = (0,255,0) if pred > 0.5 else (255,0,0)
+            cv2.rectangle(roi_color, (ex,ey), (ex+ew,ey+eh), color, 2)
+
+        if probs:
+            avg = sum(probs)/len(probs)
+            score_display = int(avg * 100)
+            status = "TERBUKA" if avg > 0.5 else "TERTUTUP"
+
+        cv2.rectangle(rgb, (x,y), (x+w,y+h), (0,255,0), 2)
+
+    # TIMER LOGIC
+    duration = 0
+    if status == "TERTUTUP":
+        if start_time_closed is None:
+            start_time_closed = time.time()
+        duration = time.time() - start_time_closed
+    elif status == "TERBUKA":
+        start_time_closed = None
+
+    alarm = duration > alarm_threshold
+
+    return rgb, status, score_display, duration, start_time_closed, alarm
 
 # ==========================================
 # SIDEBAR
 # ==========================================
-st.sidebar.title("🔧 Pengaturan")
-alarm_threshold = st.sidebar.slider(
-    "Waktu Tunggu (Detik) sebelum Alarm", 1.0, 10.0, 3.0, 0.5
+st.sidebar.title("⚙️ Pengaturan")
+
+mode = st.sidebar.radio(
+    "Pilih Mode Input",
+    ["📷 Kamera Realtime", "🖼️ Upload Foto", "🎥 Upload Video"]
 )
 
-st.title("👁️ Deteksi Kantuk Pengemudi (WebCam Browser)")
-st.info(
-    f"Alarm berbunyi jika mata tertutup lebih dari **{alarm_threshold} detik**"
+alarm_threshold = st.sidebar.slider(
+    "Alarm setelah (detik)", 1.0, 10.0, 3.0, 0.5
 )
+
+# ==========================================
+# UI
+# ==========================================
+st.title("👁️ Deteksi Kantuk Pengemudi")
 
 status_text = st.empty()
 kpi_text = st.empty()
 timer_text = st.empty()
+frame_window = st.image([])
 
 # ==========================================
-# VIDEO PROCESSOR (INTI PERBAIKAN)
+# MODE 1: KAMERA
 # ==========================================
-class VideoProcessor(VideoProcessorBase):
-    def __init__(self):
-        self.start_time_closed = None
+if mode == "📷 Kamera Realtime":
+    run = st.checkbox("Buka Kamera")
 
-    def recv(self, frame):
-        img = frame.to_ndarray(format="bgr24")
-        img = cv2.flip(img, 1)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    if run:
+        cap = cv2.VideoCapture(0)
+        start_time_closed = None
 
-        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+        while run:
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-        status = "TIDAK_TAHU"
-        score_display = 0
-        duration_closed = 0
+            frame = cv2.flip(frame, 1)
+            frame, status, score, duration, start_time_closed, alarm = process_frame(
+                frame, alarm_threshold, start_time_closed
+            )
 
-        for (x, y, w, h) in faces:
-            roi_gray = gray[y:y+h, x:x+w]
-            roi_color = img[y:y+h, x:x+w]
+            if alarm:
+                play_alarm()
+                status_text.error("⚠️ BAHAYA NGANTUK")
+            else:
+                status_text.success(status)
 
-            eyes = eye_cascade.detectMultiScale(roi_gray)
-            probs = []
+            frame_window.image(frame)
+            kpi_text.metric("Skor Mata", f"{score}%")
+            timer_text.metric("Timer", f"{duration:.2f}s")
 
-            for (ex, ey, ew, eh) in eyes:
-                eye_img = roi_color[ey:ey+eh, ex:ex+ew]
-                pred = predict_eye(eye_img)
-                probs.append(pred)
-
-                color = (0,255,0) if pred > 0.5 else (0,0,255)
-                cv2.rectangle(roi_color, (ex, ey), (ex+ew, ey+eh), color, 2)
-
-            if probs:
-                avg = sum(probs) / len(probs)
-                score_display = int(avg * 100)
-
-                if avg < 0.5:
-                    status = "TERTUTUP"
-                else:
-                    status = "TERBUKA"
-
-            cv2.rectangle(img, (x,y), (x+w,y+h), (255,255,0), 2)
-
-        # TIMER PINTAR
-        if status == "TERTUTUP":
-            if self.start_time_closed is None:
-                self.start_time_closed = time.time()
-            duration_closed = time.time() - self.start_time_closed
-
-        elif status == "TERBUKA":
-            self.start_time_closed = None
-
-        else:
-            if self.start_time_closed:
-                duration_closed = time.time() - self.start_time_closed
-
-        # UI UPDATE
-        if duration_closed > alarm_threshold:
-            status_text.error("⚠️ BAHAYA: NGANTUK!")
-            play_alarm()
-        elif status == "TERTUTUP":
-            status_text.warning("Mata Tertutup...")
-        elif status == "TERBUKA":
-            status_text.success("✅ AMAN")
-        else:
-            status_text.info("Mencari Wajah...")
-
-        kpi_text.metric("Skor Mata", f"{score_display}%")
-        timer_text.metric("Timer", f"{duration_closed:.2f}s")
-
-        return img
+        cap.release()
 
 # ==========================================
-# START CAMERA
+# MODE 2: FOTO
 # ==========================================
-webrtc_streamer(
-    key="kantuk",
-    video_processor_factory=VideoProcessor,
-    media_stream_constraints={"video": True, "audio": False},
-)
+elif mode == "🖼️ Upload Foto":
+    uploaded = st.file_uploader("Upload Foto", type=["jpg","png","jpeg"])
+
+    if uploaded:
+        file_bytes = np.asarray(bytearray(uploaded.read()), dtype=np.uint8)
+        frame = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
+        frame, status, score, duration, _, alarm = process_frame(
+            frame, alarm_threshold, None
+        )
+
+        frame_window.image(frame)
+        status_text.success(status)
+        kpi_text.metric("Skor Mata", f"{score}%")
+        timer_text.metric("Timer", f"{duration:.2f}s")
+
+# ==========================================
+# MODE 3: VIDEO
+# ==========================================
+elif mode == "🎥 Upload Video":
+    uploaded = st.file_uploader("Upload Video", type=["mp4","avi","mov"])
+
+    if uploaded:
+        tfile = tempfile.NamedTemporaryFile(delete=False)
+        tfile.write(uploaded.read())
+
+        cap = cv2.VideoCapture(tfile.name)
+        start_time_closed = None
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            frame, status, score, duration, start_time_closed, alarm = process_frame(
+                frame, alarm_threshold, start_time_closed
+            )
+
+            if alarm:
+                play_alarm()
+                status_text.error("⚠️ BAHAYA NGANTUK")
+            else:
+                status_text.success(status)
+
+            frame_window.image(frame)
+            kpi_text.metric("Skor Mata", f"{score}%")
+            timer_text.metric("Timer", f"{duration:.2f}s")
+
+        cap.release()
