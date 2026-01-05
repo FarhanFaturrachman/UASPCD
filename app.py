@@ -1,8 +1,8 @@
 import streamlit as st
 import numpy as np
-import tensorflow as tf
 import time
 from PIL import Image
+import tflite_runtime.interpreter as tflite
 
 # ==========================================
 # SETUP HALAMAN
@@ -11,11 +11,11 @@ st.set_page_config(page_title="Deteksi Kantuk", layout="wide")
 st.title("👁️ Deteksi Kantuk Pengemudi (Cloud Version)")
 
 # ==========================================
-# LOAD MODEL TFLITE
+# LOAD MODEL TFLITE (RINGAN & AMAN)
 # ==========================================
 @st.cache_resource
 def load_model():
-    interpreter = tf.lite.Interpreter(model_path="deteksi-kantuk.tflite")
+    interpreter = tflite.Interpreter(model_path="deteksi-kantuk.tflite")
     interpreter.allocate_tensors()
     return interpreter
 
@@ -23,8 +23,8 @@ try:
     interpreter = load_model()
     input_details = interpreter.get_input_details()
     output_details = interpreter.get_output_details()
-except:
-    st.error("❌ Model deteksi-kantuk.tflite tidak ditemukan")
+except Exception as e:
+    st.error("❌ Model deteksi-kantuk.tflite tidak dapat dimuat")
     st.stop()
 
 # ==========================================
@@ -38,17 +38,18 @@ def play_alarm():
     """, height=0)
 
 # ==========================================
-# FUNGSI PREDIKSI
+# FUNGSI PREDIKSI (GRAYSCALE)
 # ==========================================
 def predict_eye(img):
+    img = img.convert("L")           # grayscale
     img = img.resize((64, 64))
     img_array = np.array(img, dtype=np.float32) / 255.0
-    img_array = np.expand_dims(img_array, axis=0)
+    img_array = img_array.reshape(1, 64, 64, 1)
 
     interpreter.set_tensor(input_details[0]["index"], img_array)
     interpreter.invoke()
     output = interpreter.get_tensor(output_details[0]["index"])
-    return output[0][0]
+    return float(output[0][0])
 
 # ==========================================
 # SIDEBAR
@@ -66,7 +67,6 @@ alarm_threshold = st.sidebar.slider(
 # UI STATUS
 # ==========================================
 col1, col2, col3 = st.columns(3)
-
 status_box = col1.empty()
 score_box = col2.empty()
 timer_box = col3.empty()
@@ -80,20 +80,17 @@ if "start_time" not in st.session_state:
 # ==========================================
 # INPUT KAMERA (CLOUD)
 # ==========================================
-image_file = st.camera_input("📸 Ambil gambar mata/wajah")
+image_file = st.camera_input("📸 Ambil gambar mata / wajah")
 
 if image_file is not None:
-    image = Image.open(image_file).convert("RGB")
+    image = Image.open(image_file)
     st.image(image, caption="Input", width=400)
 
     score = predict_eye(image)
     score_percent = int(score * 100)
 
-    # ==============================
-    # LOGIKA STATUS
-    # ==============================
-    status = "TIDAK_TAHU"
-    duration = 0
+    status = "TERBUKA"
+    duration = 0.0
 
     if score < 0.5:
         status = "TERTUTUP"
@@ -101,7 +98,6 @@ if image_file is not None:
             st.session_state.start_time = time.time()
         duration = time.time() - st.session_state.start_time
     else:
-        status = "TERBUKA"
         st.session_state.start_time = None
 
     # ==============================
@@ -113,11 +109,7 @@ if image_file is not None:
         status_box.success("✅ Mata Terbuka")
 
     score_box.metric("Skor Mata Terbuka", f"{score_percent}%")
-
-    if duration > 0:
-        timer_box.metric("Timer", f"{duration:.2f} s")
-    else:
-        timer_box.metric("Timer", "0.00 s")
+    timer_box.metric("Timer", f"{duration:.2f} s")
 
     # ==============================
     # ALARM
