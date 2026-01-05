@@ -60,22 +60,24 @@ def predict_eye(eye_img):
     return interpreter.get_tensor(output_details[0]['index'])[0][0]
 
 # ==========================================
-# PROSES 1 FRAME
+# PROSES 1 FRAME (LOGIKA SAMA PERSIS)
 # ==========================================
 def process_frame(frame, alarm_threshold, start_time_closed):
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
     faces = face_cascade.detectMultiScale(gray, 1.3, 5)
-    status = "TIDAK_TAHU"
+
+    status_frame_ini = "TIDAK_TAHU"
     score_display = 0
 
     for (x, y, w, h) in faces:
         roi_gray = gray[y:y+h, x:x+w]
         roi_color = rgb[y:y+h, x:x+w]
-        eyes = eye_cascade.detectMultiScale(roi_gray)
 
+        eyes = eye_cascade.detectMultiScale(roi_gray)
         probs = []
+
         for (ex, ey, ew, eh) in eyes:
             eye_img = roi_color[ey:ey+eh, ex:ex+ew]
             pred = predict_eye(eye_img)
@@ -84,24 +86,38 @@ def process_frame(frame, alarm_threshold, start_time_closed):
             color = (0,255,0) if pred > 0.5 else (255,0,0)
             cv2.rectangle(roi_color, (ex,ey), (ex+ew,ey+eh), color, 2)
 
-        if probs:
-            avg = sum(probs) / len(probs)
-            score_display = int(avg * 100)
-            status = "TERBUKA" if avg > 0.5 else "TERTUTUP"
+        if len(probs) > 0:
+            avg_score = sum(probs) / len(probs)
+            score_display = int(avg_score * 100)
+
+            if avg_score < 0.5:
+                status_frame_ini = "TERTUTUP"
+            else:
+                status_frame_ini = "TERBUKA"
 
         cv2.rectangle(rgb, (x,y), (x+w,y+h), (0,255,0), 2)
 
-    # TIMER
+    # ==========================================
+    # TIMER PINTAR (ANTI RESET)
+    # ==========================================
     duration = 0
-    if status == "TERTUTUP":
+
+    if status_frame_ini == "TERTUTUP":
         if start_time_closed is None:
             start_time_closed = time.time()
         duration = time.time() - start_time_closed
-    elif status == "TERBUKA":
+
+    elif status_frame_ini == "TERBUKA":
         start_time_closed = None
+        duration = 0
+
+    else:  # TIDAK_TAHU
+        if start_time_closed is not None:
+            duration = time.time() - start_time_closed
 
     alarm = duration > alarm_threshold
-    return rgb, status, score_display, duration, start_time_closed, alarm
+
+    return rgb, status_frame_ini, score_display, duration, start_time_closed, alarm
 
 # ==========================================
 # SIDEBAR
@@ -129,7 +145,7 @@ timer_text = st.empty()
 frame_window = st.image([])
 
 # ==========================================
-# MODE 1: KAMERA REALTIME
+# MODE KAMERA REALTIME
 # ==========================================
 if mode == "📷 Kamera Realtime":
     run = st.checkbox("Buka Kamera")
@@ -148,7 +164,6 @@ if mode == "📷 Kamera Realtime":
         while run:
             ret, frame = cap.read()
             if not ret:
-                cam_status.error("❌ Gagal membaca frame kamera")
                 break
 
             frame = cv2.flip(frame, 1)
@@ -160,63 +175,47 @@ if mode == "📷 Kamera Realtime":
             if alarm:
                 play_alarm()
                 status_text.error("⚠️ BAHAYA NGANTUK")
+            elif status == "TERTUTUP":
+                status_text.warning("Mata Tertutup...")
+            elif status == "TERBUKA":
+                status_text.success("✅ AMAN")
             else:
-                status_text.success(status)
+                status_text.info("Mencari Wajah...")
 
             frame_window.image(frame)
             kpi_text.metric("Skor Mata", f"{score}%")
             timer_text.metric("Timer", f"{duration:.2f}s")
 
         cap.release()
-    else:
-        cam_status.info("📷 Kamera belum dibuka")
 
 # ==========================================
-# MODE 2: FOTO
+# MODE FOTO & VIDEO (TETAP JALAN NORMAL)
 # ==========================================
 elif mode == "🖼️ Upload Foto":
     uploaded = st.file_uploader("Upload Foto", type=["jpg","png","jpeg"])
-
     if uploaded:
         file_bytes = np.asarray(bytearray(uploaded.read()), dtype=np.uint8)
         frame = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-
-        frame, status, score, duration, _, _ = process_frame(
-            frame, alarm_threshold, None
-        )
-
+        frame, status, score, duration, _, _ = process_frame(frame, alarm_threshold, None)
         frame_window.image(frame)
-        status_text.success(status)
+        status_text.info(status)
         kpi_text.metric("Skor Mata", f"{score}%")
         timer_text.metric("Timer", f"{duration:.2f}s")
 
-# ==========================================
-# MODE 3: VIDEO
-# ==========================================
 elif mode == "🎥 Upload Video":
     uploaded = st.file_uploader("Upload Video", type=["mp4","avi","mov"])
-
     if uploaded:
         tfile = tempfile.NamedTemporaryFile(delete=False)
         tfile.write(uploaded.read())
-
         cap = cv2.VideoCapture(tfile.name)
-
-        if not cap.isOpened():
-            st.error("❌ Video tidak bisa dibuka")
-            st.stop()
-        else:
-            st.success("🎥 Video berhasil dimuat")
 
         fps = cap.get(cv2.CAP_PROP_FPS)
         delay = 1 / fps if fps > 0 else 0.03
-
         start_time_closed = None
 
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
-                st.info("✅ Video selesai")
                 break
 
             frame, status, score, duration, start_time_closed, alarm = process_frame(
@@ -226,13 +225,17 @@ elif mode == "🎥 Upload Video":
             if alarm:
                 play_alarm()
                 status_text.error("⚠️ BAHAYA NGANTUK")
+            elif status == "TERTUTUP":
+                status_text.warning("Mata Tertutup...")
+            elif status == "TERBUKA":
+                status_text.success("✅ AMAN")
             else:
-                status_text.success(status)
+                status_text.info("Wajah Hilang (Timer Lanjut...)")
 
             frame_window.image(frame)
             kpi_text.metric("Skor Mata", f"{score}%")
             timer_text.metric("Timer", f"{duration:.2f}s")
 
-            time.sleep(delay)  # 🔑 bikin video jalan
+            time.sleep(delay)
 
         cap.release()
