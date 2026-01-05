@@ -1,122 +1,97 @@
 import streamlit as st
+import cv2
 import numpy as np
-import time
-from PIL import Image
-import tflite_runtime.interpreter as tflite
+import tensorflow as tf
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
+import av
 
-# ==========================================
-# SETUP HALAMAN
-# ==========================================
-st.set_page_config(page_title="Deteksi Kantuk", layout="wide")
-st.title("👁️ Deteksi Kantuk Pengemudi (Cloud Version)")
+st.set_page_config(page_title="Deteksi Kantuk Realtime", layout="centered")
 
-# ==========================================
-# LOAD MODEL TFLITE (RINGAN & AMAN)
-# ==========================================
+# ======================
+# LOAD MODEL TFLITE
+# ======================
 @st.cache_resource
 def load_model():
-    interpreter = tflite.Interpreter(model_path="deteksi-kantuk.tflite")
+    interpreter = tf.lite.Interpreter(model_path="deteksi-kantuk.tflite")
     interpreter.allocate_tensors()
     return interpreter
 
-try:
-    interpreter = load_model()
-    input_details = interpreter.get_input_details()
-    output_details = interpreter.get_output_details()
-except Exception as e:
-    st.error("❌ Model deteksi-kantuk.tflite tidak dapat dimuat")
-    st.stop()
+interpreter = load_model()
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
 
-# ==========================================
-# FUNGSI ALARM
-# ==========================================
-def play_alarm():
-    st.components.v1.html("""
-    <audio autoplay>
-        <source src="https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3" type="audio/mp3">
-    </audio>
-    """, height=0)
-
-# ==========================================
-# FUNGSI PREDIKSI (GRAYSCALE)
-# ==========================================
-def predict_eye(img):
-    img = img.convert("L")           # grayscale
-    img = img.resize((64, 64))
-    img_array = np.array(img, dtype=np.float32) / 255.0
-    img_array = img_array.reshape(1, 64, 64, 1)
-
-    interpreter.set_tensor(input_details[0]["index"], img_array)
-    interpreter.invoke()
-    output = interpreter.get_tensor(output_details[0]["index"])
-    return float(output[0][0])
-
-# ==========================================
-# SIDEBAR
-# ==========================================
-st.sidebar.title("🔧 Pengaturan")
-alarm_threshold = st.sidebar.slider(
-    "Waktu Tunggu Alarm (detik)",
-    min_value=1.0,
-    max_value=10.0,
-    value=3.0,
-    step=0.5
+# ======================
+# DETEKSI WAJAH & MATA
+# ======================
+face_cascade = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+)
+eye_cascade = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_eye.xml"
 )
 
-# ==========================================
-# UI STATUS
-# ==========================================
-col1, col2, col3 = st.columns(3)
-status_box = col1.empty()
-score_box = col2.empty()
-timer_box = col3.empty()
+# ======================
+# FUNGSI PREDIKSI
+# ======================
+def predict_eye(eye_img):
+    img = cv2.resize(eye_img, (64, 64))
+    img = img.astype(np.float32) / 255.0
+    img = np.expand_dims(img, axis=0)
 
-# ==========================================
-# STATE TIMER
-# ==========================================
-if "start_time" not in st.session_state:
-    st.session_state.start_time = None
+    interpreter.set_tensor(input_details[0]['index'], img)
+    interpreter.invoke()
+    return interpreter.get_tensor(output_details[0]['index'])[0][0]
 
-# ==========================================
-# INPUT KAMERA (CLOUD)
-# ==========================================
-image_file = st.camera_input("📸 Ambil gambar mata / wajah")
+# ======================
+# VIDEO PROCESSOR
+# ======================
+class VideoProcessor(VideoProcessorBase):
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-if image_file is not None:
-    image = Image.open(image_file)
-    st.image(image, caption="Input", width=400)
+        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
 
-    score = predict_eye(image)
-    score_percent = int(score * 100)
+        status = "AMAN"
+        color = (0, 255, 0)
 
-    status = "TERBUKA"
-    duration = 0.0
+        for (x, y, w, h) in faces:
+            roi_gray = gray[y:y+h, x:x+w]
+            roi_color = img[y:y+h, x:x+w]
 
-    if score < 0.5:
-        status = "TERTUTUP"
-        if st.session_state.start_time is None:
-            st.session_state.start_time = time.time()
-        duration = time.time() - st.session_state.start_time
-    else:
-        st.session_state.start_time = None
+            eyes = eye_cascade.detectMultiScale(roi_gray)
+            scores = []
 
-    # ==============================
-    # TAMPILKAN STATUS
-    # ==============================
-    if status == "TERTUTUP":
-        status_box.warning("😴 Mata Tertutup")
-    else:
-        status_box.success("✅ Mata Terbuka")
+            for (ex, ey, ew, eh) in eyes:
+                eye_img = roi_color[ey:ey+eh, ex:ex+ew]
+                pred = predict_eye(eye_img)
+                scores.append(pred)
 
-    score_box.metric("Skor Mata Terbuka", f"{score_percent}%")
-    timer_box.metric("Timer", f"{duration:.2f} s")
+                ec = (0,255,0) if pred > 0.5 else (0,0,255)
+                cv2.rectangle(roi_color, (ex, ey), (ex+ew, ey+eh), ec, 2)
 
-    # ==============================
-    # ALARM
-    # ==============================
-    if duration >= alarm_threshold:
-        st.error("🚨 BAHAYA! ANDA MENGANTUK!")
-        play_alarm()
+            if scores and np.mean(scores) < 0.5:
+                status = "NGANTUK"
+                color = (0, 0, 255)
 
-else:
-    st.info("Silakan ambil gambar menggunakan kamera")
+            cv2.rectangle(img, (x,y), (x+w,y+h), color, 3)
+
+        cv2.putText(
+            img, status, (20,40),
+            cv2.FONT_HERSHEY_SIMPLEX, 1, color, 3
+        )
+
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+# ======================
+# UI
+# ======================
+st.title("👁️ Deteksi Kantuk Realtime (WebRTC)")
+st.info("Gunakan kamera browser. Model berjalan realtime di server.")
+
+webrtc_streamer(
+    key="kantuk",
+    video_processor_factory=VideoProcessor,
+    media_stream_constraints={"video": True, "audio": False},
+    async_processing=True,
+)
